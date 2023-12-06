@@ -664,6 +664,17 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
+    if args.val_max_target_length is None:
+        args.val_max_target_length = args.max_target_length
+
+    accelerator.wait_for_everyone()
+    gen_kwargs = {
+        "max_length": args.val_max_target_length if args is not None else config.max_length,
+        "num_beams": args.num_beams,
+    }
+    test_mgpu(model, tokenizer, os.path.join(args.output_dir, "initial"), accelerator, args, gen_kwargs)
+    accelerator.wait_for_everyone()
+
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         if args.with_tracking:
@@ -710,7 +721,7 @@ def main():
         }
         samples_seen = 0
         for step, batch in enumerate(eval_dataloader):
-            print(f"batch keys:{batch.keys()}")
+            #print(f"batch keys:{batch.keys()}") # 'input_ids', 'attention_mask', 'labels', 'decode_input_ids'
             with torch.no_grad():
                 generated_tokens = accelerator.unwrap_model(model).generate(
                     batch["input_ids"],
@@ -781,8 +792,8 @@ def main():
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
-            if accelerator.is_main_process:
-                test_mgpu(accelerator.unwrap_model(model), tokenizer, output_dir, accelerator, args, gen_kwargs=None)
+            #if accelerator.is_main_process:
+            test_mgpu(accelerator.unwrap_model(model), tokenizer, output_dir, accelerator, args, gen_kwargs)
 
     if args.with_tracking:
         accelerator.end_training()
@@ -797,7 +808,8 @@ def main():
             tokenizer.save_pretrained(args.output_dir)
             if args.push_to_hub:
                 repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
-            test_mgpu(unwrapped_model, tokenizer, args.output_dir, accelerator, args, gen_kwargs=None)
+        accelerator.wait_for_everyone()
+        test_mgpu(unwrapped_model, tokenizer, args.output_dir, accelerator, args, gen_kwargs)
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump({"eval_bleu": eval_metric["score"]}, f)
 

@@ -39,7 +39,8 @@ def test(model, tokenizer, output_dir, eval_batch_size=16):
                 "datasets/test/test-fr.zh.txt",
                 "datasets/test/test-ru.zh.txt",
                 ]
-    tar_langs = ["en_XX", "es_XX", "fr_XX", "ru_RU"]
+    tar_langs = ["en_XX", "es_XX", "fr_XX"
+                 , "ru_RU"]
     # Translate each line using GPU
     total_lines_count = 0 
     all_translated_lines = [] 
@@ -76,10 +77,10 @@ def test_mgpu(model, tokenizer, output_dir, accelerator, args, gen_kwargs=None):
     # Define source and target languages
     source_lang = "zh_CN" # Replace with the source language code
     mtarl2tarl = {"en_XX":"en", "es_XX":"es", "fr_XX":"fr", "ru_RU":"ru"}
-    test_files = ["datasets/test/test-en.zh.txt",
-                "datasets/test/test-es.zh.txt",
-                "datasets/test/test-fr.zh.txt",
-                "datasets/test/test-ru.zh.txt",
+    test_files = ["datasets/test/test-en.zh.json",
+                "datasets/test/test-es.zh.json",
+                "datasets/test/test-fr.zh.json",
+                "datasets/test/test-ru.zh.json",
                 ]
     tar_langs = ["en_XX", "es_XX", "fr_XX", "ru_RU"]
 
@@ -88,27 +89,32 @@ def test_mgpu(model, tokenizer, output_dir, accelerator, args, gen_kwargs=None):
     for test_file, target_lang in zip(test_files, tar_langs):
         translated_lines = test_per_lang(model, tokenizer, accelerator, test_file, source_lang, target_lang, args, gen_kwargs)
         for line in tqdm(translated_lines):
-            all_translated_lines.append(f"{total_lines_count+1}\t{line}\t{target_lang}")
+            all_translated_lines.append(f"{total_lines_count+1}\t{line}\t{mtarl2tarl[target_lang]}")
             total_lines_count += 1
+        accelerator.wait_for_everyone()
 
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
         # Output the translated lines
-    output_file_path = os.path.join(output_dir, f"test.txt")
-    os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+        output_file_path = os.path.join(output_dir, f"test.txt")
+        os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
 
-    with open(output_file_path, 'w', encoding='utf-8') as file:
-        file.write("id\ttext\ttype\n")  # Writing the header
-        file.writelines("\n".join(all_translated_lines))
+        with open(output_file_path, 'w', encoding='utf-8') as file:
+            file.write("id\ttext\ttype\n")  # Writing the header
+            file.writelines("\n".join(all_translated_lines))
 
-    print(f"Translation completed. Output saved to {output_file_path}")
+        print(f"Translation completed. Output saved to {output_file_path}")
 
-    submit_file_path = os.path.join(output_dir, f"submit.txt")
-    postprocess(output_file_path, submit_file_path)
+        submit_file_path = os.path.join(output_dir, f"submit.txt")
+        postprocess(output_file_path, submit_file_path)
 
 
-def test_per_lang(model, tokenizer, accelerator, test_file, source_lang, tgt_lang, args, gen_kwargs=None):
+def test_per_lang(model, tokenizer, accelerator, test_file, src_lang, tgt_lang, args, gen_kwargs=None):
     model.eval()
 
     target_lang = tgt_lang.split("_")[0]
+    source_lang = src_lang.split("_")[0]
+    print(f"source_lang:{source_lang}, target_lang:{target_lang}")
     # prepare dataset
     extension = test_file.split(".")[-1]
     data_files = {}
@@ -174,13 +180,13 @@ def test_per_lang(model, tokenizer, accelerator, test_file, source_lang, tgt_lan
     samples_seen = 0
     all_translated_lines = [] 
     for step, batch in enumerate(test_dataloader):
-        print(f"batch keys:{batch.keys()}")
+        # print(f"batch keys:{batch.keys()}") 'input_ids', 'attention_mask', 'labels'
         with torch.no_grad():
-            print(f"input_ids & labels:{batch['input_ids'][0]}, {batch['labels'][0]}")
+            #print(f"input_ids & labels:{batch['input_ids'][0]}, {batch['labels'][0]}")
             generated_tokens = accelerator.unwrap_model(model).generate(
                 batch["input_ids"],
                 attention_mask=batch["attention_mask"],
-                forced_bos_token_id=tokenizer.lang_code_to_id[tgt_lang]
+                forced_bos_token_id=tokenizer.lang_code_to_id[tgt_lang],
                 **gen_kwargs,
             )
 
@@ -204,7 +210,6 @@ def test_per_lang(model, tokenizer, accelerator, test_file, source_lang, tgt_lan
                     samples_seen += len(decoded_preds)
 
             all_translated_lines.extend(decoded_preds)
-    print(f"len(all_translated_lines):{len(all_translated_lines)}")
     assert len(all_translated_lines) == 500
 
     return all_translated_lines
