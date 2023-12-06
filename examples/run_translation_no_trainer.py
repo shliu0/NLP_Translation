@@ -59,6 +59,8 @@ from transformers import (
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+from test_func import test
+
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.36.0.dev0")
@@ -95,6 +97,9 @@ def parse_args():
     )
     parser.add_argument(
         "--train_file", type=str, default=None, help="A csv or a json file containing the training data."
+    )
+    parser.add_argument(
+        "--test_file", type=str, default=None, help="A csv or a json file containing the test data."
     )
 
     parser.add_argument(
@@ -248,6 +253,7 @@ def parse_args():
         "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
+    parser.add_argument("--tboard_dir", type=str, default=None, help="Where to store the tensorboard log file.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
         "--model_type",
@@ -311,6 +317,9 @@ def parse_args():
     if args.validation_file is not None:
         extension = args.validation_file.split(".")[-1]
         assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
+    if args.test_file is not None:
+        extension = args.test_file.split(".")[-1]
+        assert extension in ["csv", "json"], "`test_file` should be a csv or a json file."
 
     if args.push_to_hub:
         assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
@@ -330,8 +339,9 @@ def main():
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
     # in the environment
     accelerator = (
-        Accelerator(log_with=args.report_to, project_dir=args.output_dir) if args.with_tracking else Accelerator()
+        Accelerator(log_with=args.report_to, project_dir=args.tboard_dir) if args.with_tracking else Accelerator()
     )
+    print(accelerator.device)
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -390,6 +400,8 @@ def main():
             data_files["train"] = args.train_file
         if args.validation_file is not None:
             data_files["validation"] = args.validation_file
+        if args.test_file is not None:
+            data_files["test"] = args.test_file
         extension = args.train_file.split(".")[-1]
         raw_datasets = load_dataset(extension, data_files=data_files)
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
@@ -506,6 +518,7 @@ def main():
 
     train_dataset = processed_datasets["train"]
     eval_dataset = processed_datasets["validation"]
+    test_dataset = processed_datasets["test"]
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
@@ -532,6 +545,7 @@ def main():
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+    test_dataloader = DataLoader(test_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -563,8 +577,8 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler, test_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler, test_dataloader
     )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -730,8 +744,8 @@ def main():
         if args.with_tracking:
             accelerator.log(
                 {
-                    "bleu": eval_metric["score"],
-                    "train_loss": total_loss.item() / len(train_dataloader),
+                    f"{target_lang}-bleu": eval_metric["score"],
+                    f"{target_lang}-train_loss": total_loss.item() / len(train_dataloader),
                     "epoch": epoch,
                     "step": completed_steps,
                 },
@@ -755,6 +769,8 @@ def main():
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
+            if accelerator.is_main_process:
+                test(accelerator.unwrap_model(model), tokenizer, output_dir)
 
     if args.with_tracking:
         accelerator.end_training()
@@ -769,6 +785,7 @@ def main():
             tokenizer.save_pretrained(args.output_dir)
             if args.push_to_hub:
                 repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
+            test(unwrapped_model, tokenizer, args.output_dir)
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump({"eval_bleu": eval_metric["score"]}, f)
 
