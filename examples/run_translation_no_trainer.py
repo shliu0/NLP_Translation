@@ -59,7 +59,7 @@ from transformers import (
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
-from test_func import test
+from test_func import test_mgpu
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -518,7 +518,8 @@ def main():
 
     train_dataset = processed_datasets["train"]
     eval_dataset = processed_datasets["validation"]
-    test_dataset = processed_datasets["test"]
+    if args.test_file is not None:
+        test_dataset = processed_datasets["test"]
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
@@ -545,7 +546,8 @@ def main():
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
-    test_dataloader = DataLoader(test_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+    if args.test_file is not None:
+        test_dataloader = DataLoader(test_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -577,9 +579,14 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler, test_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler, test_dataloader
-    )
+    if args.test_file is not None:
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler, test_dataloader = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, lr_scheduler, test_dataloader
+        )
+    else:
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+        )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -674,6 +681,7 @@ def main():
                 total_loss += loss.detach().float()
             loss = loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
+            progress_bar.set_description(f"Loss: {loss:.4f}")
             if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                 optimizer.step()
                 lr_scheduler.step()
@@ -702,6 +710,7 @@ def main():
         }
         samples_seen = 0
         for step, batch in enumerate(eval_dataloader):
+            print(f"batch keys:{batch.keys()}")
             with torch.no_grad():
                 generated_tokens = accelerator.unwrap_model(model).generate(
                     batch["input_ids"],
@@ -739,7 +748,10 @@ def main():
 
                 metric.add_batch(predictions=decoded_preds, references=decoded_labels)
         eval_metric = metric.compute()
-        logger.info({"bleu": eval_metric["score"]})
+        logger.info({f"epoch": epoch})
+        logger.info({f"step": completed_steps})
+        logger.info({f"{target_lang}-bleu": eval_metric["score"]})
+        logger.info({f"{target_lang}-train_loss": total_loss.item() / len(train_dataloader)})
 
         if args.with_tracking:
             accelerator.log(
@@ -770,7 +782,7 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
             if accelerator.is_main_process:
-                test(accelerator.unwrap_model(model), tokenizer, output_dir)
+                test_mgpu(accelerator.unwrap_model(model), tokenizer, output_dir, accelerator, args, gen_kwargs=None)
 
     if args.with_tracking:
         accelerator.end_training()
@@ -785,7 +797,7 @@ def main():
             tokenizer.save_pretrained(args.output_dir)
             if args.push_to_hub:
                 repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
-            test(unwrapped_model, tokenizer, args.output_dir)
+            test_mgpu(unwrapped_model, tokenizer, args.output_dir, accelerator, args, gen_kwargs=None)
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump({"eval_bleu": eval_metric["score"]}, f)
 
